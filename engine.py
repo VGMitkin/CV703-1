@@ -100,7 +100,7 @@ def train(model,
 
         val_loss = val_epoch(model, val_loader, criterion, device)
 
-        if epoch//25 == 0 or epoch == epochs:
+        if epoch ==1 or epoch % 25 == 0 or epoch == epochs:
             accuracy = get_accuracy(model, val_loader, device)
             print(f"Accuracy: {accuracy:.4f}")
 
