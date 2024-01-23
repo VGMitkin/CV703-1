@@ -43,6 +43,21 @@ def val_epoch(model,
     return loss_history / len(val_dl)
 
 
+def get_accuracy(model, val_dl, device):
+    model.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for x_batch, y_batch in tqdm(val_dl, leave=False):
+            x_batch = x_batch.to(device)
+            y_batch = y_batch.to(device)
+            y_pred = model(x_batch)
+            _, predicted = torch.max(y_pred.data, 1)
+            total += y_batch.size(0)
+            correct += (predicted == y_batch).sum().item()
+    return correct / total
+
+
 def train(model,
         train_loader,
         val_loader,
@@ -59,6 +74,7 @@ def train(model,
     results = {
         "train_loss": [],
         "val_loss": [],
+        "accuracy": set(),
         "learning_rate": [],
     }
     best_val_loss = np.inf
@@ -83,12 +99,19 @@ def train(model,
         results["train_loss"].append(train_loss)
 
         val_loss = val_epoch(model, val_loader, criterion, device)
+
+        if epoch//25 == 0 or epoch == epochs:
+            accuracy = get_accuracy(model, val_loader, device)
+            print(f"Accuracy: {accuracy:.4f}")
+
+        results["accuracy"].add(accuracy)
+
         print(f"Val Loss: {val_loss:.4f}")
         print()
 
         results["val_loss"].append(val_loss)
 
-        wandb.log({"train_loss": train_loss, "val_loss": val_loss, "learning_rate": optimizer.param_groups[0]["lr"]})
+        wandb.log({"train_loss": train_loss, "val_loss": val_loss,"accuracy": accuracy, "learning_rate": optimizer.param_groups[0]["lr"]})
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
