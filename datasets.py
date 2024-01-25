@@ -1,27 +1,20 @@
 from __future__ import print_function, division
 
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.optim import lr_scheduler
-from torch.utils.data import ConcatDataset
 import numpy as np
 import torchvision
-from torchvision import datasets, models, transforms
+from torchvision import transforms
 from torchvision.datasets import VisionDataset
 from torchvision.datasets.folder import default_loader
-import matplotlib.pyplot as plt
 from PIL import Image
 import pandas as pd
-import time
 import os
-import copy
 
 
 mean = (0.485, 0.456, 0.406)
 std = (0.229, 0.224, 0.225)
 
-data_root = "/home/vladislav/Documents/Studies/CV703/Assignment 1/datasets/CUB/CUB_200_2011"
+data_root = "/home/vladislav/Documents/Studies/CV703/Assignment 1/datasets/CUBDataset"
 
 data_transform = transforms.Compose([
             transforms.Resize((224, 224)),
@@ -163,8 +156,13 @@ class FGVCAircraft(VisionDataset):
 
 
 class FOODDataset(torch.utils.data.Dataset):
-    def __init__(self, dataframe):
-        self.dataframe = dataframe
+    def __init__(self, image_root_path, caption_root_path=None, split="train", transform=None, *args, **kwargs):
+
+        self.split = split
+        self.dataframe = pd.read_csv(f'{image_root_path}/annot/{split}_info.csv', names= ['image_name','label'])
+        self.dataframe['path'] = self.dataframe['image_name'].map(lambda x: os.path.join(f'{image_root_path}/{split}_set/', x))
+        self.transform = transform
+        self.classes = self.dataframe.label.unique().tolist()
 
     def __len__(self):
         return len(self.dataframe)
@@ -172,5 +170,5 @@ class FOODDataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         row = self.dataframe.iloc[index]
         return (
-            data_transform(Image.open(row["path"])), row['label']
+            self.transform(Image.open(row["path"])), row['label']
         )

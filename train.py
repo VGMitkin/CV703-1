@@ -3,14 +3,13 @@ from __future__ import print_function, division
 from datasets import CUBDataset, FGVCAircraft, FOODDataset
 from engine import train
 from model import get_model
-from utils import plot_results, EarlyStopper
+from utils import plot_results, get_concat_set, EarlyStopper, WarmupLR
 
 import torch
 from torch.utils.data import DataLoader
 import torch.nn as nn
 import torch.optim as optim
-from torch.optim import lr_scheduler
-from torch.utils.data import ConcatDataset
+from sam.sam import SAM
 from torchvision.transforms import v2
 import torchvision
 from torch.utils.data import default_collate
@@ -31,30 +30,42 @@ import wandb
 
 config = yaml.load(open('config.yaml', 'r'), Loader=yaml.FullLoader)
 
-
 run = wandb.init(entity='metalab', project='cv703_assignment1', config=config)
 
+datasets = {0: CUBDataset, 1: FGVCAircraft, 2: FOODDataset}
+# optimizers = {0: optim.AdamW, 1: SAM}
 
 LEARNING_RATE = float(config["LEARNING_RATE"])
 LEARNING_SCHEDULER = config["LEARNING_SCHEDULER"]
+OPTIMIZER = int(config["OPTIMIZER"])
 BATCH_SIZE = int(config["BATCH_SIZE"])
 NUM_EPOCHS = int(config["NUM_EPOCHS"])
-LINEAR_PROBING = config["LINEAR_PROBING"]
-PROBING_EPOCHS = int(config["PROBING_EPOCHS"])
+
+FINETUNE = config["FINETUNE"]
+FINETUNE_EPOCHS = int(config["FINETUNE_EPOCHS"])
+FINETUNE_LR = float(config["FINETUNE_LR"])
+WARMUP_EPOCHS = int(config["WARMUP_EPOCHS"])
+WARMUP_LR = float(config["WARMUP_LR"])
+EARLY_STOPPING = config["EARLY_STOPPING"]
 PATIENCE = int(config["PATIENCE"])
 
 LOSS = config["LOSS"]
+LABEL_SMOOTHING = float(config["LABEL_SMOOTHING"])
 
 IMAGE_SIZE = int(config["IMAGE_SIZE"])
 MODEL = config["MODEL"]
 PRETRAINED = config["PRETRAINED"]
+FREEZE = config["FREEZE"]
+
+DATASET = config["DATASET"]
+CONCAT_DATASET = config["CONCAT_DATASET"]
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using {DEVICE} device")
 
 
 def START_seed():
-    seed = 9
+    seed = 42
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -64,16 +75,6 @@ def START_seed():
 
 def main():
     START_seed()
-
-    #run id is date and time of the run
-    run_id = time.strftime("%Y-%m-%d_%H-%M-%S")
-
-    #create folder for this run in runs folder
-    os.mkdir("/home/vladislav/Documents/Studies/CV703/Assignment 1/runs/" + run_id)
-
-    save_dir = "/home/vladislav/Documents/Studies/CV703/Assignment 1/runs/" + run_id
-      
-    data_root = "/home/vladislav/Documents/Studies/CV703/Assignment 1/datasets/CUB/CUB_200_2011"
 
     mean = (0.485, 0.456, 0.406)
     std = (0.229, 0.224, 0.225)
@@ -96,13 +97,17 @@ def main():
             v2.Normalize(mean=mean, std=std)
         ])
 
-    train_dataset_cub = CUBDataset(image_root_path=f"{data_root}", transform=data_transform, split="train")
-    test_dataset_cub = CUBDataset(image_root_path=f"{data_root}", transform=val_transform, split="test")
+    if CONCAT_DATASET:
+        train_dataset, test_dataset, class_names = get_concat_set(data_transform, val_transform, BATCH_SIZE)
+    else:
+        dataset = datasets[DATASET]
+        data_root = f"/home/vladislav/Documents/Studies/CV703/Assignment 1/datasets/{datasets[DATASET].__name__}"
 
+        train_dataset = dataset(image_root_path=f"{data_root}", transform=data_transform, split="train")
+        test_dataset = dataset(image_root_path=f"{data_root}", transform=val_transform, split="test")
 
-    data_root = "/home/vladislav/Documents/Studies/CV703/Assignment 1/datasets/fgvc-aircraft-2013b"
-
-    num_classes = len(train_dataset_cub.classes)
+        class_names = train_dataset.classes
+    num_classes = len(class_names)
 
     cutmix = v2.CutMix(num_classes=num_classes, alpha=1.0)
     mixup = v2.MixUp(num_classes=num_classes, alpha=0.2)
@@ -111,92 +116,79 @@ def main():
     def collate_fn(batch):
         return cutmix_or_mixup(*default_collate(batch))
 
-    # load in into the torch dataloader to get variable batch size, shuffle 
-    train_loader_cub = torch.utils.data.DataLoader(train_dataset_cub, batch_size=BATCH_SIZE, drop_last=True, shuffle=True, num_workers=8, collate_fn=collate_fn)
-    test_loader_cub = torch.utils.data.DataLoader(test_dataset_cub, batch_size=BATCH_SIZE, drop_last=False, shuffle=False, num_workers=8)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, drop_last=True, shuffle=True, num_workers=8, collate_fn=collate_fn)
+    test_loader= DataLoader(test_dataset, batch_size=BATCH_SIZE, drop_last=False, shuffle=False, num_workers=8)
 
+    #run id is date and time of the run
+    run_id = time.strftime("%Y-%m-%d_%H-%M-%S")
 
-    train_dataset_aircraft = FGVCAircraft(root=f"{data_root}", transform=data_transform, train=True)
-    test_dataset_aircraft = FGVCAircraft(root=f"{data_root}", transform=val_transform, train=False)
-
-    # load in into the torch dataloader to get variable batch size, shuffle 
-    train_loader_aircraft = torch.utils.data.DataLoader(train_dataset_aircraft, batch_size=BATCH_SIZE, drop_last=True, shuffle=True)
-    test_loader_aircraft = torch.utils.data.DataLoader(test_dataset_aircraft, batch_size=BATCH_SIZE, drop_last=False, shuffle=False)
-
-
-    data_dir = "/home/vladislav/Documents/Studies/CV703/Assignment 1/datasets/FoodX/food_dataset"
-
-    split = 'train'
-    train_df = pd.read_csv(f'{data_dir}/annot/{split}_info.csv', names= ['image_name','label'])
-    train_df['path'] = train_df['image_name'].map(lambda x: os.path.join(f'{data_dir}/{split}_set/', x))
-
-    split = 'val'
-    val_df = pd.read_csv(f'{data_dir}/annot/{split}_info.csv', names= ['image_name','label'])
-    val_df['path'] = val_df['image_name'].map(lambda x: os.path.join(f'{data_dir}/{split}_set/', x))
-
-    train_dataset = FOODDataset(train_df)
-    val_dataset = FOODDataset(val_df)
-
-    # load in into the torch dataloader to get variable batch size, shuffle 
-    train_loader_food = torch.utils.data.DataLoader(train_dataset, batch_size=BATCH_SIZE, drop_last=True, shuffle=True)
-    val_loader_food = torch.utils.data.DataLoader(val_dataset, batch_size=BATCH_SIZE, drop_last=False, shuffle=True)
-
-
-    ##################### Concatenate CUB Birds and FGVC Aircraft Datasets
-
-    concat_dataset_train = ConcatDataset([train_dataset_cub, train_dataset_aircraft])
-    concat_dataset_test = ConcatDataset([test_dataset_cub, test_dataset_aircraft])
-
-    concat_loader_train = torch.utils.data.DataLoader(
-                concat_dataset_train,
-                batch_size=BATCH_SIZE, shuffle=True,
-                num_workers=1, pin_memory=True
-                )
-    concat_loader_test = torch.utils.data.DataLoader(
-                concat_dataset_test,
-                batch_size=BATCH_SIZE, shuffle=False,
-                num_workers=1, pin_memory=True
-                )
+    #create folder for this run in runs folder
+    os.mkdir("/home/vladislav/Documents/Studies/CV703/Assignment 1/runs/" + run_id)
+    save_dir = "/home/vladislav/Documents/Studies/CV703/Assignment 1/runs/" + run_id
 
     #load model
-    model = get_model(MODEL, num_classes, PRETRAINED)
+    model = get_model(MODEL, num_classes, PRETRAINED, FREEZE)
 
 
     model.to(DEVICE)
     torch.compile(model)
     
     #load optimizer
-    if LOSS == "MSE":
-        loss = torch.nn.MSELoss()
-    elif LOSS == "L1Loss":
-        loss = torch.nn.L1Loss()
-    elif LOSS == "SmoothL1Loss":
-        loss = torch.nn.SmoothL1Loss()
-    elif LOSS == "CrossEntropyLoss":
-        loss = torch.nn.CrossEntropyLoss()
-        
-    else:
+    if  LOSS == "CrossEntropyLoss":
+        loss = torch.nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
+    else :
         raise Exception("Loss not implemented")
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+    if OPTIMIZER == 1:
+        base_optimizer = torch.optim.AdamW
+        optimizer = SAM(model.parameters(), base_optimizer, rho=2.0, adaptive=True, lr=LEARNING_RATE, weight_decay=0.0005)
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+
+    lr_scheduler = WarmupLR(optimizer, WARMUP_EPOCHS, WARMUP_LR, LEARNING_RATE)
+    lr_scheduler.step()
+
+    results = train(
+        model=model,
+        train_loader=train_loader,
+        val_loader=test_loader,
+        criterion=loss,
+        optimizer=optimizer,
+        lr_scheduler=lr_scheduler,
+        device=DEVICE,
+        epochs=WARMUP_EPOCHS,
+        save_dir=save_dir,
+    )
+
+    train_summary = {
+        "config": config,
+        "results": results,
+    }
+
+    train_summary["results"]["train_loss"] += results["train_loss"]
+    train_summary["results"]["val_loss"] += results["val_loss"]
+    train_summary["results"]["accuracy"] += results["accuracy"]
+
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = LEARNING_RATE
 
     if LEARNING_SCHEDULER == "CosineAnnealingLR":
-        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(NUM_EPOCHS//5))
+        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(NUM_EPOCHS), eta_min=FINETUNE_LR)
     else:
         lr_scheduler = None
 
-    early_stopper = EarlyStopper(patience=PATIENCE, min_delta=0.001)
-
-    if LINEAR_PROBING:
-        linear_probing_epochs = PROBING_EPOCHS
+    if EARLY_STOPPING:
+        early_stopper = EarlyStopper(patience=PATIENCE, min_delta=0.001)
     else:
-        linear_probing_epochs = None
+        early_stopper = None
+
+    unfreeze_order = [5, 4, 3, 2, 1, 0]
      
     #train model
     results = train(
         model=model,
-        train_loader=train_loader_cub,
-        val_loader=test_loader_cub,
+        train_loader=train_loader,
+        val_loader=test_loader,
         criterion=loss,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
@@ -204,19 +196,45 @@ def main():
         epochs=NUM_EPOCHS,
         save_dir=save_dir,
         early_stopper=early_stopper,
-        linear_probing_epochs=linear_probing_epochs
+        unfreeze=unfreeze_order
     )
 
+    lr_scheduler.step()
 
-    train_summary = {
-        "config": config,
-        "results": results,
-    }
+    train_summary["results"]["train_loss"] += results["train_loss"]
+    train_summary["results"]["val_loss"] += results["val_loss"]
+    train_summary["results"]["accuracy"] += results["accuracy"]
+
+    if FINETUNE:
+        for param in model.parameters():
+            param.requires_grad = True
+
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = FINETUNE_LR
+        
+        lr_scheduler = None
+
+        results = train(
+            model=model,
+            train_loader=train_loader,
+            val_loader=test_loader,
+            criterion=loss,
+            optimizer=optimizer,
+            lr_scheduler=lr_scheduler,
+            device=DEVICE,
+            epochs=FINETUNE_EPOCHS,
+            save_dir=save_dir,
+        )
+
+        train_summary["results"]["train_loss"] += results["train_loss"]
+        train_summary["results"]["val_loss"] += results["val_loss"]
+        train_summary["results"]["accuracy"] += results["accuracy"]
 
     with open(save_dir + "/train_summary.json", "w") as f:
         json.dump(train_summary, f, indent=4)
 
     plot_results(results["train_loss"], results["val_loss"], "Loss", save_dir)
+    plot_results(train_summary["results"]["accuracy"], None, "Accuracy", save_dir)
 
 if __name__ == "__main__":
     main()
