@@ -33,10 +33,11 @@ config = yaml.load(open('config.yaml', 'r'), Loader=yaml.FullLoader)
 run = wandb.init(entity='metalab', project='cv703_assignment1', config=config)
 
 datasets = {0: CUBDataset, 1: FGVCAircraft, 2: FOODDataset}
-# optimizers = {0: optim.AdamW, 1: SAM}
+optimizers = {0: optim.AdamW, 1: SAM}
 
 LEARNING_RATE = float(config["LEARNING_RATE"])
 LEARNING_SCHEDULER = config["LEARNING_SCHEDULER"]
+DECAY_STEP = int(config["DECAY_STEP"])
 OPTIMIZER = int(config["OPTIMIZER"])
 BATCH_SIZE = int(config["BATCH_SIZE"])
 NUM_EPOCHS = int(config["NUM_EPOCHS"])
@@ -56,6 +57,7 @@ IMAGE_SIZE = int(config["IMAGE_SIZE"])
 MODEL = config["MODEL"]
 PRETRAINED = config["PRETRAINED"]
 FREEZE = config["FREEZE"]
+UNFREEZE_LAYERS = config["UNFREEZE_LAYERS"]
 
 DATASET = config["DATASET"]
 CONCAT_DATASET = config["CONCAT_DATASET"]
@@ -79,7 +81,6 @@ def main():
     mean = (0.485, 0.456, 0.406)
     std = (0.229, 0.224, 0.225)
 
-    # write data transform here as per the requirement
     data_transform = v2.Compose([
         v2.ToImage(),
         v2.RandomResizedCrop((IMAGE_SIZE, IMAGE_SIZE), scale=(0.7, 1.0), antialias=True),
@@ -98,7 +99,7 @@ def main():
         ])
 
     if CONCAT_DATASET:
-        train_dataset, test_dataset, class_names = get_concat_set(data_transform, val_transform, BATCH_SIZE)
+        train_dataset, test_dataset, class_names = get_concat_set(data_transform, val_transform)
     else:
         dataset = datasets[DATASET]
         data_root = f"/home/vladislav/Documents/Studies/CV703/Assignment 1/datasets/{datasets[DATASET].__name__}"
@@ -107,14 +108,15 @@ def main():
         test_dataset = dataset(image_root_path=f"{data_root}", transform=val_transform, split="test")
 
         class_names = train_dataset.classes
+        
     num_classes = len(class_names)
 
-    cutmix = v2.CutMix(num_classes=num_classes, alpha=1.0)
+    cutmix = v2.CutMix(num_classes=num_classes, alpha=0.2)
     mixup = v2.MixUp(num_classes=num_classes, alpha=0.2)
     cutmix_or_mixup = v2.RandomChoice([cutmix, mixup])
 
     def collate_fn(batch):
-        return cutmix_or_mixup(*default_collate(batch))
+        return cutmix_or_mixup(*default_collate(batch)) if MODEL == "TransConvNeXtV2Base" else None
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, drop_last=True, shuffle=True, num_workers=8, collate_fn=collate_fn)
     test_loader= DataLoader(test_dataset, batch_size=BATCH_SIZE, drop_last=False, shuffle=False, num_workers=8)
@@ -128,37 +130,46 @@ def main():
 
     #load model
     model = get_model(MODEL, num_classes, PRETRAINED, FREEZE)
+    unfreeze_order = [3, 2, 1] if UNFREEZE_LAYERS else None
 
 
     model.to(DEVICE)
     torch.compile(model)
     
-    #load optimizer
+    
     if  LOSS == "CrossEntropyLoss":
         loss = torch.nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
     else :
         raise Exception("Loss not implemented")
     
+    #load optimizer
     if OPTIMIZER == 1:
         base_optimizer = torch.optim.AdamW
         optimizer = SAM(model.parameters(), base_optimizer, rho=2.0, adaptive=True, lr=LEARNING_RATE, weight_decay=0.0005)
     else:
-        optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=WARMUP_LR)
 
     lr_scheduler = WarmupLR(optimizer, WARMUP_EPOCHS, WARMUP_LR, LEARNING_RATE)
     lr_scheduler.step()
-
-    results = train(
-        model=model,
-        train_loader=train_loader,
-        val_loader=test_loader,
-        criterion=loss,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        device=DEVICE,
-        epochs=WARMUP_EPOCHS,
-        save_dir=save_dir,
-    )
+    
+    if WARMUP_EPOCHS > 1:
+        results = train(
+            model=model,
+            train_loader=train_loader,
+            val_loader=test_loader,
+            criterion=loss,
+            optimizer=optimizer,
+            lr_scheduler=lr_scheduler,
+            device=DEVICE,
+            epochs=WARMUP_EPOCHS,
+            save_dir=save_dir,
+        )
+    else:
+        results = {
+            "train_loss": [],
+            "val_loss": [],
+            "accuracy": []
+        }
 
     train_summary = {
         "config": config,
@@ -173,7 +184,7 @@ def main():
         param_group["lr"] = LEARNING_RATE
 
     if LEARNING_SCHEDULER == "CosineAnnealingLR":
-        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(NUM_EPOCHS), eta_min=FINETUNE_LR)
+        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(NUM_EPOCHS//DECAY_STEP), eta_min=FINETUNE_LR)
     else:
         lr_scheduler = None
 
@@ -181,9 +192,7 @@ def main():
         early_stopper = EarlyStopper(patience=PATIENCE, min_delta=0.001)
     else:
         early_stopper = None
-
-    unfreeze_order = [5, 4, 3, 2, 1, 0]
-     
+    
     #train model
     results = train(
         model=model,
@@ -233,9 +242,8 @@ def main():
     with open(save_dir + "/train_summary.json", "w") as f:
         json.dump(train_summary, f, indent=4)
 
-    plot_results(results["train_loss"], results["val_loss"], "Loss", save_dir)
+    plot_results(train_summary["results"]["train_loss"], train_summary["results"]["val_loss"], "Loss", save_dir)
     plot_results(train_summary["results"]["accuracy"], None, "Accuracy", save_dir)
 
 if __name__ == "__main__":
     main()
-

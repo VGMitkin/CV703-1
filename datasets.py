@@ -64,20 +64,6 @@ train_dataset_cub = CUBDataset(image_root_path=f"{data_root}", transform=data_tr
 
 
 class FGVCAircraft(VisionDataset):
-    """
-    FGVC-Aircraft <http://www.robots.ox.ac.uk/~vgg/data/fgvc-aircraft/>`_ Dataset.
-
-    Args:
-        root (string): Root directory of the dataset.
-        train (bool, optional): If True, creates dataset from training set, otherwise
-            creates from test set.
-        class_type (string, optional): choose from ('variant', 'family', 'manufacturer').
-        transform (callable, optional): A function/transform that  takes in an PIL image
-            and returns a transformed version. E.g, ``transforms.RandomCrop``
-        target_transform (callable, optional): A function/transform that takes in the
-            target and transforms it.
-    """
-    
     class_types = ('variant', 'family', 'manufacturer')
     splits = ('train', 'val', 'trainval', 'test')
     img_folder = os.path.join('data', 'images')

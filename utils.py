@@ -1,6 +1,7 @@
 from datasets import CUBDataset, FGVCAircraft
 
 import torch
+from torch import nn
 from torch.utils.data import ConcatDataset
 from matplotlib import pyplot as plt
 
@@ -15,7 +16,6 @@ def load_model(model, path):
 
 
 def plot_results(train_data, val_data=None, label=None, save_dir=None):
-
     plt.figure(figsize=(6, 6))
     plt.title(label)
     plt.xlabel('Epoch')
@@ -45,12 +45,6 @@ class EarlyStopper:
         return False
     
 class Permute(torch.nn.Module):
-    """This module returns a view of the tensor input with its dimensions permuted.
-
-    Args:
-        dims (List[int]): The desired ordering of dimensions
-    """
-
     def __init__(self, dims):
         super().__init__()
         self.dims = dims
@@ -79,7 +73,19 @@ class WarmupLR:
         self.current_epoch += 1
 
 
-def get_concat_set(data_transform, val_transform, batch_size, collate_fn=None):
+class GRN(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.zeros(1, 1, 1, dim))
+        self.beta = nn.Parameter(torch.zeros(1, 1, 1, dim))
+
+    def forward(self, x):
+        Gx = torch.norm(x, p=2, dim=(1,2), keepdim=True)
+        Nx = Gx / (Gx.mean(dim=-1, keepdim=True) + 1e-6)
+        return self.gamma * (x * Nx) + self.beta + x
+
+
+def get_concat_set(data_transform, val_transform):
     train_dataset_cub = CUBDataset(image_root_path="/home/vladislav/Documents/Studies/CV703/Assignment 1/datasets/CUBDataset", transform=data_transform, split="train")
     test_dataset_cub = CUBDataset(image_root_path="/home/vladislav/Documents/Studies/CV703/Assignment 1/datasets/CUBDataset", transform=val_transform, split="test")
 
