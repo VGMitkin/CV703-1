@@ -151,6 +151,17 @@ def main():
 
     lr_scheduler = WarmupLR(optimizer, WARMUP_EPOCHS, WARMUP_LR, LEARNING_RATE)
     lr_scheduler.step()
+
+    results = {
+            "train_loss": [],
+            "val_loss": [],
+            "accuracy": []
+        }
+
+    train_summary = {
+            "config": config,
+            "results": results,
+        }
     
     if WARMUP_EPOCHS > 1:
         results = train(
@@ -164,21 +175,9 @@ def main():
             epochs=WARMUP_EPOCHS,
             save_dir=save_dir,
         )
-    else:
-        results = {
-            "train_loss": [],
-            "val_loss": [],
-            "accuracy": []
-        }
-
-    train_summary = {
-        "config": config,
-        "results": results,
-    }
-
-    train_summary["results"]["train_loss"] += results["train_loss"]
-    train_summary["results"]["val_loss"] += results["val_loss"]
-    train_summary["results"]["accuracy"] += results["accuracy"]
+        train_summary["results"]["train_loss"] += results["train_loss"]
+        train_summary["results"]["val_loss"] += results["val_loss"]
+        train_summary["results"]["accuracy"] += results["accuracy"]
 
     for param_group in optimizer.param_groups:
         param_group["lr"] = LEARNING_RATE
